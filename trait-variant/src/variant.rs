@@ -122,7 +122,7 @@ fn transform_item(item: &TraitItem, bounds: &Vec<TypeParamBound>) -> TraitItem {
     let TraitItem::Fn(fn_item @ TraitItemFn { sig, .. }) = item else {
         return item.clone();
     };
-    let (arrow, output) = if sig.asyncness.is_some() {
+    let (arrow, output, default) = if sig.asyncness.is_some() {
         let orig = match &sig.output {
             ReturnType::Default => quote! { () },
             ReturnType::Type(_, ty) => quote! { #ty },
@@ -134,7 +134,14 @@ fn transform_item(item: &TraitItem, bounds: &Vec<TypeParamBound>) -> TraitItem {
                 .chain(bounds.iter().cloned())
                 .collect(),
         });
-        (syn::parse2(quote! { -> }).unwrap(), ty)
+        (
+            syn::parse2(quote! { -> }).unwrap(),
+            ty,
+            fn_item
+                .default
+                .as_ref()
+                .map(|b| syn::parse2(dbg!(quote! { { async move #b } })).unwrap()),
+        )
     } else {
         match &sig.output {
             ReturnType::Type(arrow, ty) => match &**ty {
@@ -143,7 +150,7 @@ fn transform_item(item: &TraitItem, bounds: &Vec<TypeParamBound>) -> TraitItem {
                         impl_token: it.impl_token,
                         bounds: it.bounds.iter().chain(bounds).cloned().collect(),
                     });
-                    (*arrow, ty)
+                    (*arrow, ty, fn_item.default.clone())
                 }
                 _ => return item.clone(),
             },
@@ -156,6 +163,7 @@ fn transform_item(item: &TraitItem, bounds: &Vec<TypeParamBound>) -> TraitItem {
             output: ReturnType::Type(arrow, Box::new(output)),
             ..sig.clone()
         },
+        default,
         ..fn_item.clone()
     })
 }

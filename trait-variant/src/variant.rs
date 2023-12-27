@@ -37,14 +37,47 @@ struct MakeVariant {
     #[allow(unused)]
     colon: Token![:],
     bounds: Punctuated<TraitBound, Plus>,
+    supertraits: Punctuated<TraitBound, Plus>,
 }
 
 impl Parse for MakeVariant {
     fn parse(input: ParseStream) -> Result<Self> {
+        let name = input.parse()?;
+        let colon = input.parse()?;
+
+        let mut bounds = Punctuated::new();
+        loop {
+            if input.is_empty() {
+                break;
+            }
+            let value = input.parse()?;
+            bounds.push_value(value);
+            if input.is_empty() {
+                break;
+            }
+            if input.peek(Token![|]) {
+                break;
+            }
+            let punct = input.parse()?;
+            bounds.push_punct(punct);
+        }
+
+        let pipe = input
+            .peek(Token![|])
+            .then(|| input.parse::<Token![|]>())
+            .transpose()?;
+
+        let supertraits = if pipe.is_some() {
+            input.parse_terminated(TraitBound::parse, Token![+])?
+        } else {
+            Punctuated::new()
+        };
+
         Ok(Self {
-            name: input.parse()?,
-            colon: input.parse()?,
-            bounds: input.parse_terminated(TraitBound::parse, Token![+])?,
+            name,
+            colon,
+            bounds,
+            supertraits,
         })
     }
 }
@@ -86,25 +119,32 @@ fn mk_variant(attrs: &Attrs, tr: &ItemTrait) -> TokenStream {
         ref name,
         colon: _,
         ref bounds,
+        ref supertraits,
     } = attrs.variant;
-    let bounds: Vec<_> = bounds
+    let bounds = bounds.iter().map(|b| TypeParamBound::Trait(b.clone()));
+    let supertraits = supertraits
         .into_iter()
-        .map(|b| TypeParamBound::Trait(b.clone()))
-        .collect();
+        .map(|b| TypeParamBound::Trait(b.clone()));
     let variant = ItemTrait {
         ident: name.clone(),
-        supertraits: tr.supertraits.iter().chain(&bounds).cloned().collect(),
+        supertraits: tr
+            .supertraits
+            .iter()
+            .cloned()
+            .chain(bounds.clone())
+            .chain(supertraits)
+            .collect(),
         items: tr
             .items
             .iter()
-            .map(|item| transform_item(item, &bounds))
+            .map(|item| transform_item(item, bounds.clone()))
             .collect(),
         ..tr.clone()
     };
     quote! { #variant }
 }
 
-fn transform_item(item: &TraitItem, bounds: &Vec<TypeParamBound>) -> TraitItem {
+fn transform_item(item: &TraitItem, bounds: impl Iterator<Item = TypeParamBound>) -> TraitItem {
     // #[make_variant(SendIntFactory: Send)]
     // trait IntFactory {
     //     async fn make(&self, x: u32, y: &str) -> i32;
@@ -131,7 +171,7 @@ fn transform_item(item: &TraitItem, bounds: &Vec<TypeParamBound>) -> TraitItem {
         let ty = Type::ImplTrait(TypeImplTrait {
             impl_token: syn::parse2(quote! { impl }).unwrap(),
             bounds: iter::once(TypeParamBound::Trait(future))
-                .chain(bounds.iter().cloned())
+                .chain(bounds)
                 .collect(),
         });
         (syn::parse2(quote! { -> }).unwrap(), ty)
@@ -141,7 +181,7 @@ fn transform_item(item: &TraitItem, bounds: &Vec<TypeParamBound>) -> TraitItem {
                 Type::ImplTrait(it) => {
                     let ty = Type::ImplTrait(TypeImplTrait {
                         impl_token: it.impl_token,
-                        bounds: it.bounds.iter().chain(bounds).cloned().collect(),
+                        bounds: it.bounds.iter().cloned().chain(bounds).collect(),
                     });
                     (*arrow, ty)
                 }

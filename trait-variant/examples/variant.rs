@@ -40,4 +40,14 @@ where
     async fn take(&self, s: S);
 }
 
+#[trait_variant::make(BaseTrait: Send)]
+pub trait LocalBaseTrait {
+    async fn foo();
+}
+
+#[trait_variant::make(SubTrait: Send | BaseTrait)]
+pub trait LocalSubTrait: LocalBaseTrait {
+    async fn foo();
+}
+
 fn main() {}

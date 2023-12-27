@@ -162,7 +162,7 @@ fn transform_item(item: &TraitItem, bounds: impl Iterator<Item = TypeParamBound>
     let TraitItem::Fn(fn_item @ TraitItemFn { sig, .. }) = item else {
         return item.clone();
     };
-    let (arrow, output) = if sig.asyncness.is_some() {
+    let (arrow, output, generics, default) = if sig.asyncness.is_some() {
         let orig = match &sig.output {
             ReturnType::Default => quote! { () },
             ReturnType::Type(_, ty) => quote! { #ty },
@@ -174,7 +174,24 @@ fn transform_item(item: &TraitItem, bounds: impl Iterator<Item = TypeParamBound>
                 .chain(bounds)
                 .collect(),
         });
-        (syn::parse2(quote! { -> }).unwrap(), ty)
+        let mut generics = fn_item.sig.generics.clone();
+        if fn_item.default.is_some() {
+            if let Some(wh) = &mut generics.where_clause {
+                wh.predicates
+                    .push(syn::parse2(quote! { Self: Sync }).unwrap());
+            } else {
+                generics.where_clause = Some(syn::parse2(quote! { where Self: Sync }).unwrap())
+            }
+        }
+        (
+            syn::parse2(quote! { -> }).unwrap(),
+            ty,
+            generics,
+            fn_item
+                .default
+                .as_ref()
+                .map(|b| syn::parse2(quote! { { async move #b } }).unwrap()),
+        )
     } else {
         match &sig.output {
             ReturnType::Type(arrow, ty) => match &**ty {
@@ -183,7 +200,12 @@ fn transform_item(item: &TraitItem, bounds: impl Iterator<Item = TypeParamBound>
                         impl_token: it.impl_token,
                         bounds: it.bounds.iter().cloned().chain(bounds).collect(),
                     });
-                    (*arrow, ty)
+                    (
+                        *arrow,
+                        ty,
+                        fn_item.sig.generics.clone(),
+                        fn_item.default.clone(),
+                    )
                 }
                 _ => return item.clone(),
             },
@@ -194,8 +216,10 @@ fn transform_item(item: &TraitItem, bounds: impl Iterator<Item = TypeParamBound>
         sig: Signature {
             asyncness: None,
             output: ReturnType::Type(arrow, Box::new(output)),
+            generics,
             ..sig.clone()
         },
+        default,
         ..fn_item.clone()
     })
 }
@@ -224,11 +248,30 @@ fn mk_blanket_impl(attrs: &Attrs, tr: &ItemTrait) -> TokenStream {
         .items
         .iter()
         .map(|item| blanket_impl_item(item, variant, &generic_names));
-    let where_clauses = tr.generics.where_clause.as_ref().map(|wh| &wh.predicates);
+    let mut where_clauses = tr
+        .generics
+        .where_clause
+        .as_ref()
+        .map(|wh| wh.predicates.clone())
+        .unwrap_or_default();
+    // if there is a defaulted method, than that defaulted method has a bound of Self: Sync,
+    // which means the blanket impl must also require T: Sync
+    let self_is_sync = tr.items.iter().any(|item| {
+        matches!(
+            item,
+            TraitItem::Fn(TraitItemFn {
+                default: Some(_),
+                ..
+            })
+        )
+    });
+    if self_is_sync {
+        where_clauses.push(syn::parse2(quote! { Self: Sync }).unwrap());
+    }
     quote! {
         impl<#generics #trailing_comma TraitVariantBlanketType> #orig<#generic_names>
         for TraitVariantBlanketType
-        where TraitVariantBlanketType: #variant<#generic_names>, #where_clauses
+        where Self: #variant<#generic_names>, #where_clauses
         {
             #(#items)*
         }
